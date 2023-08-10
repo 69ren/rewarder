@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
+pragma solidity 0.8.12;
 pragma abicoder v2;
 
-import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import {IHypervisor} from "./interfaces/IHypervisor.sol";
+import {console} from "hardhat/console.sol";
 import "./interfaces/IHypervisor.sol";
 import "./interfaces/IGauge.sol";
 
@@ -19,7 +22,7 @@ contract MultiFeeDistribution is
     PausableUpgradeable,
     OwnableUpgradeable
 {
-    using SafeERC20Upgradeable for IERC20Upgradeable;
+    using SafeERC20 for IERC20;
 
     struct RewardData {
         uint256 amount;
@@ -94,6 +97,9 @@ contract MultiFeeDistribution is
         __Ownable_init();
     }
 
+    uint256 public platformFee;
+    address public platformFeeReceiver;
+
     /********************** Setters ***********************/
 
     /**
@@ -134,6 +140,15 @@ contract MultiFeeDistribution is
         gauge = IHypervisor(stakingToken).gauge();
     }
 
+    /// @notice fee is percent * 1e18. e.g. 0.2 * 1e18 for a 20% performance fee.
+    function setPerformanceFees(uint _fee) external onlyOwner {
+        platformFee = _fee;
+    }
+
+    function setPlatformFeeReceiver(address _receiver) external onlyOwner {
+        platformFeeReceiver = _receiver;
+    }
+
     /**
      * @notice Add a new reward token to be distributed to stakers.
      * @param _rewardToken address
@@ -159,7 +174,7 @@ contract MultiFeeDistribution is
         uint256 tokenAmount
     ) external onlyOwner {
         if (rewardData[tokenAddress].lastTimeUpdated > 0) revert ActiveReward();
-        IERC20Upgradeable(tokenAddress).safeTransfer(owner(), tokenAmount);
+        IERC20(tokenAddress).safeTransfer(owner(), tokenAmount);
         emit Recovered(tokenAddress, tokenAmount);
     }
 
@@ -217,7 +232,7 @@ contract MultiFeeDistribution is
             _calculateClaimable(onBehalfOf, rewardTokens[i]);
         }
 
-        IERC20Upgradeable(stakingToken).safeTransferFrom(
+        IERC20(stakingToken).safeTransferFrom(
             msg.sender,
             address(this),
             amount
@@ -240,7 +255,7 @@ contract MultiFeeDistribution is
         for (uint i; i < rewardTokens.length; i++) {
             _calculateClaimable(onBehalfOf, rewardTokens[i]);
         }
-        IERC20Upgradeable(stakingToken).safeTransfer(onBehalfOf, amount);
+        IERC20(stakingToken).safeTransfer(onBehalfOf, amount);
 
         userInfo.tokenAmount -= amount;
         totalStakes -= amount;
@@ -348,6 +363,7 @@ contract MultiFeeDistribution is
                 tick1
             );
         }
+        earned -= (earned * platformFee) / 1e18;
     }
 
     /**
@@ -359,9 +375,15 @@ contract MultiFeeDistribution is
             address rewardToken = rewardTokens[i];
             if (totalStakes > 0) {
                 RewardData storage r = rewardData[rewardToken];
-                uint256 currentBalance = IERC20Upgradeable(rewardToken)
+                uint256 currentBalance = IERC20(rewardToken)
                     .balanceOf(address(this));
                 uint256 diff = currentBalance - r.amount;
+                uint256 fee = (diff * platformFee) / 1e18;
+                diff -= fee;
+                IERC20(rewardToken).safeTransfer(
+                    platformFeeReceiver,
+                    fee
+                );
                 r.lastTimeUpdated = block.timestamp;
                 r.rewardPerToken += (diff * 1e50) / totalStakes;
                 r.amount = currentBalance;
@@ -402,7 +424,7 @@ contract MultiFeeDistribution is
             _updateReward();
             _calculateClaimable(_user, token);
             if (claimable[token][_user] > 0) {
-                IERC20Upgradeable(token).safeTransfer(
+                IERC20(token).safeTransfer(
                     _user,
                     claimable[token][_user]
                 );
