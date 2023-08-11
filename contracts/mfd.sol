@@ -12,6 +12,7 @@ import {IHypervisor} from "./interfaces/IHypervisor.sol";
 import {console} from "hardhat/console.sol";
 import "./interfaces/IHypervisor.sol";
 import "./interfaces/IGauge.sol";
+import "./interfaces/INeadFeeHandler.sol";
 
 /// @title Multi Fee Distribution Contract
 /// @author Gamma
@@ -97,6 +98,7 @@ contract MultiFeeDistribution is
         __Ownable_init();
     }
 
+    // new vars
     uint256 public platformFee;
     address public platformFeeReceiver;
 
@@ -140,7 +142,7 @@ contract MultiFeeDistribution is
         gauge = IHypervisor(stakingToken).gauge();
     }
 
-    /// @notice fee is percent * 1e18. e.g. 0.2 * 1e18 for a 20% performance fee.
+    /// @notice fee is percent in decimal * 1e18. e.g. 0.2 * 1e18 (200000000000000000) for a 20% performance fee.
     function setPerformanceFees(uint _fee) external onlyOwner {
         platformFee = _fee;
     }
@@ -295,21 +297,21 @@ contract MultiFeeDistribution is
         UserData storage userInfo = userData[_user];
 
         uint pending = gaugeEarned(_rewardToken);
+        pending -= (pending * platformFee) / 1e18;
 
-        // only update integrals when balance is > 0
         if (userInfo.tokenAmount > 0) {
-            uint integral = rewardInfo.rewardPerToken;
+            uint rewardPerToken = rewardInfo.rewardPerToken;
 
             if (totalStakes > 0) {
-                integral =
-                    rewardInfo.rewardPerToken +
-                    ((pending * 1e50) / totalStakes);
+                rewardPerToken += ((pending * 1e50) / totalStakes);
             }
 
-            uint integralFor = userInfo.rewardPerToken[_rewardToken];
+            uint userRewardPerToken = userInfo.rewardPerToken[_rewardToken];
 
-            if (integralFor < integral) {
-                earnings = (integral - integralFor) * userInfo.tokenAmount;
+            if (userRewardPerToken < rewardPerToken) {
+                earnings =
+                    (rewardPerToken - userRewardPerToken) *
+                    userInfo.tokenAmount;
             }
         }
     }
@@ -375,18 +377,24 @@ contract MultiFeeDistribution is
             address rewardToken = rewardTokens[i];
             if (totalStakes > 0) {
                 RewardData storage r = rewardData[rewardToken];
-                uint256 currentBalance = IERC20(rewardToken)
-                    .balanceOf(address(this));
-                uint256 diff = currentBalance - r.amount;
-                uint256 fee = (diff * platformFee) / 1e18;
-                diff -= fee;
-                IERC20(rewardToken).safeTransfer(
-                    platformFeeReceiver,
-                    fee
+                uint256 currentBalance = IERC20(rewardToken).balanceOf(
+                    address(this)
                 );
+
+                uint256 diff = currentBalance - r.amount;
+                if (diff > 0) {
+                    uint256 fee = (diff * platformFee) / 1e18;
+                    diff -= fee;
+                    IERC20(rewardToken).safeTransfer(platformFeeReceiver, fee);
+                    INeadFeeHandler(platformFeeReceiver).notifyFees(
+                        rewardToken,
+                        fee
+                    );
+
+                    r.rewardPerToken += (diff * 1e50) / totalStakes;
+                    r.amount = currentBalance;
+                }
                 r.lastTimeUpdated = block.timestamp;
-                r.rewardPerToken += (diff * 1e50) / totalStakes;
-                r.amount = currentBalance;
             }
         }
     }
@@ -424,10 +432,7 @@ contract MultiFeeDistribution is
             _updateReward();
             _calculateClaimable(_user, token);
             if (claimable[token][_user] > 0) {
-                IERC20(token).safeTransfer(
-                    _user,
-                    claimable[token][_user]
-                );
+                IERC20(token).safeTransfer(_user, claimable[token][_user]);
                 r.amount -= claimable[token][_user];
                 claimable[token][_user] = 0;
                 emit RewardPaid(_user, token, claimable[token][_user]);
